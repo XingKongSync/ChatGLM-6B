@@ -1,19 +1,10 @@
 from fastapi import FastAPI, Request
 from transformers import AutoTokenizer, AutoModel
 import uvicorn, json, datetime
-import torch
+from options import parser
+from starlette.responses import StreamingResponse
 
-DEVICE = "cuda"
-DEVICE_ID = "0"
-CUDA_DEVICE = f"{DEVICE}:{DEVICE_ID}" if DEVICE_ID else DEVICE
-
-
-def torch_gc():
-    if torch.cuda.is_available():
-        with torch.cuda.device(CUDA_DEVICE):
-            torch.cuda.empty_cache()
-            torch.cuda.ipc_collect()
-
+cmd_opts = parser.parse_args()
 
 app = FastAPI()
 
@@ -26,15 +17,7 @@ async def create_item(request: Request):
     json_post_list = json.loads(json_post)
     prompt = json_post_list.get('prompt')
     history = json_post_list.get('history')
-    max_length = json_post_list.get('max_length')
-    top_p = json_post_list.get('top_p')
-    temperature = json_post_list.get('temperature')
-    response, history = model.chat(tokenizer,
-                                   prompt,
-                                   history=history,
-                                   max_length=max_length if max_length else 2048,
-                                   top_p=top_p if top_p else 0.7,
-                                   temperature=temperature if temperature else 0.95)
+    response, history = model.chat(tokenizer, prompt, history=history)
     now = datetime.datetime.now()
     time = now.strftime("%Y-%m-%d %H:%M:%S")
     answer = {
@@ -45,12 +28,61 @@ async def create_item(request: Request):
     }
     log = "[" + time + "] " + '", prompt:"' + prompt + '", response:"' + repr(response) + '"'
     print(log)
-    torch_gc()
     return answer
 
 
+@app.post("/stream")
+async def stream(request: Request):
+    global model, tokenizer
+    json_post_raw = await request.json()
+    json_post = json.dumps(json_post_raw)
+    json_post_list = json.loads(json_post)
+    prompt = json_post_list.get('prompt')
+    history = json_post_list.get('history')
+    def event_stream():
+        nonlocal history  # 将外层函数的 history 变量声明为 nonlocal，使其可以在内层函数中修改
+        for response, new_history in model.stream_chat(tokenizer, prompt, history=history):
+            history = new_history  # 将新的 history 变量值赋给外层的 history 变量
+            query, response = history[-1]
+            jsonResponse = {'message': response}
+            jsonResponse = json.dumps(jsonResponse)
+            # 生成 SSE 格式的响应
+            event = f"data: {jsonResponse}\n\n"
+            # 发送事件响应
+            yield event
+
+    # 返回 StreamingResponse 类型的响应
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
 if __name__ == '__main__':
-    tokenizer = AutoTokenizer.from_pretrained("THUDM/chatglm-6b", trust_remote_code=True)
-    model = AutoModel.from_pretrained("THUDM/chatglm-6b", trust_remote_code=True).half().cuda()
-    model.eval()
-    uvicorn.run(app, host='0.0.0.0', port=8000, workers=1)
+    uvicorn.run('api:app', host='0.0.0.0', port=8000, workers=1)
+
+tokenizer = AutoTokenizer.from_pretrained(cmd_opts.model_path, trust_remote_code=True)
+model = AutoModel.from_pretrained(cmd_opts.model_path, trust_remote_code=True)
+
+def prepare_model():
+    global model
+    if cmd_opts.cpu:
+        model = model.float()
+    else:
+        if cmd_opts.precision == "fp16":
+            model = model.half().cuda()
+        elif cmd_opts.precision == "int4":
+            model = model.half().quantize(4).cuda()
+        elif cmd_opts.precision == "int8":
+            model = model.half().quantize(8).cuda()
+
+    model = model.eval()
+
+prepare_model()
+
+
+def test():
+    try:
+        global model, tokenizer
+        model.chat(tokenizer, "1+1=?", [])
+    except Exception as e:
+        print(e)
+
+test()

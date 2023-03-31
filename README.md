@@ -9,6 +9,10 @@ ChatGLM-6B 是一个开源的、支持中英双语的对话语言模型，详情
 
 ## 接口调用示例
 
+这个Go语言写的服务端调用了此接口
+
+[https://github.com/XingKongSync/GoChatGLM](https://github.com/XingKongSync/GoChatGLM)
+
 ```go
 const (
 	STREAM_API_URL = "http://127.0.0.1:8000/stream"
